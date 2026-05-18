@@ -410,7 +410,7 @@ def run_training_experiment() -> None:
         d_ff         = 512,    # paper uses 2048
         dropout      = 0.1,
         batch_size   = 128,
-        num_epochs   = 10,
+        num_epochs   = 50,
         warmup_steps = 4000,
         label_smooth = 0.1,
         min_freq     = 2,
@@ -420,7 +420,7 @@ def run_training_experiment() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[train] Using device: {device}")
 
-    wandb.init(project="da6401-a3", config=config)
+    wandb.init(project="da6401-a3", entity="IITmRL",config=config)
     cfg = wandb.config
 
     # ── Data ─────────────────────────────────────────────────────────
