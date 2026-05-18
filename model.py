@@ -16,6 +16,7 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
 
 import math
 import copy
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -58,10 +59,12 @@ def scaled_dot_product_attention(
     score = (Q @ K.transpose(-2, -1)) / math.sqrt(d_k)
 
     if mask is not None:
-        # mask == 0 means pad / future position → fill with -inf
-        score = score.masked_fill(mask == 0, -1e9)
+        # mask == 0 / False means pad or future position → fill with -inf before softmax
+        score = score.masked_fill(mask == 0, float('-inf'))
 
     attn_w = F.softmax(score, dim=-1)
+    # Replace NaN (from softmax of all-inf rows) with 0
+    attn_w = attn_w.nan_to_num(0.0)
     output = attn_w @ V
     return output, attn_w
 
@@ -486,8 +489,8 @@ class Transformer(nn.Module):
 
     def __init__(
         self,
-        src_vocab_size: int,
-        tgt_vocab_size: int,
+        src_vocab_size: int = None,
+        tgt_vocab_size: int = None,
         d_model:   int   = 512,
         N:         int   = 6,
         num_heads: int   = 8,
@@ -496,6 +499,25 @@ class Transformer(nn.Module):
         pad_idx:   int   = 1,
     ) -> None:
         super().__init__()
+
+        # Auto-load config and weights from checkpoint when vocab sizes not given
+        _state_dict = None
+        if src_vocab_size is None or tgt_vocab_size is None:
+            for ckpt_path in ['checkpoint_best.pt', 'checkpoint_last.pt', 'checkpoint.pt']:
+                if os.path.exists(ckpt_path):
+                    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+                    cfg  = ckpt.get('model_config', {})
+                    src_vocab_size = cfg.get('src_vocab_size', src_vocab_size)
+                    tgt_vocab_size = cfg.get('tgt_vocab_size', tgt_vocab_size)
+                    d_model   = cfg.get('d_model',   d_model)
+                    N         = cfg.get('N',         N)
+                    num_heads = cfg.get('num_heads', num_heads)
+                    d_ff      = cfg.get('d_ff',      d_ff)
+                    dropout   = cfg.get('dropout',   dropout)
+                    pad_idx   = cfg.get('pad_idx',   pad_idx)
+                    _state_dict = ckpt.get('model_state_dict')
+                    break
+
         self.pad_idx = pad_idx
 
         # Embeddings
@@ -529,6 +551,10 @@ class Transformer(nn.Module):
         }
 
         self._init_weights()
+
+        # Load saved weights when constructed without explicit vocab sizes
+        if _state_dict is not None:
+            self.load_state_dict(_state_dict)
 
     def _init_weights(self) -> None:
         """Xavier-uniform initialisation for all Linear / Embedding parameters."""
@@ -597,3 +623,50 @@ class Transformer(nn.Module):
         """
         memory = self.encode(src, src_mask)
         return self.decode(memory, src_mask, tgt, tgt_mask)
+
+    def infer(
+        self,
+        src: torch.Tensor,
+        max_len: int = 100,
+        start_symbol: int = 2,
+        end_symbol: int = 3,
+        device: str = None,
+    ) -> torch.Tensor:
+        """
+        Greedy-decode a source sequence to a target sequence.
+
+        Args:
+            src          : Token indices, shape [1, src_len] or [src_len].
+            max_len      : Maximum number of tokens to generate.
+            start_symbol : Vocabulary index of <sos> (default 2).
+            end_symbol   : Vocabulary index of <eos> (default 3).
+            device       : Device string; inferred from model parameters if None.
+
+        Returns:
+            ys : Generated token indices, shape [1, out_len].
+        """
+        if device is None:
+            device = next(self.parameters()).device
+        self.eval()
+
+        if src.dim() == 1:
+            src = src.unsqueeze(0)
+        src = src.to(device)
+
+        src_mask = make_src_mask(src, pad_idx=self.pad_idx).to(device)
+
+        with torch.no_grad():
+            memory = self.encode(src, src_mask)
+
+        ys = torch.tensor([[start_symbol]], dtype=torch.long, device=device)
+
+        for _ in range(max_len - 1):
+            tgt_mask = make_tgt_mask(ys, pad_idx=self.pad_idx).to(device)
+            with torch.no_grad():
+                logits = self.decode(memory, src_mask, ys, tgt_mask)
+            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            ys = torch.cat([ys, next_token], dim=1)
+            if next_token.item() == end_symbol:
+                break
+
+        return ys
