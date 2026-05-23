@@ -504,7 +504,13 @@ class Transformer(nn.Module):
         _state_dict = None
         if src_vocab_size is None or tgt_vocab_size is None:
             _model_dir = os.path.dirname(os.path.abspath(__file__))
-            _search_dirs = ['.', _model_dir]
+            _search_dirs = [
+                '.',
+                _model_dir,
+                os.path.join(_model_dir, '..'),          # parent of model.py dir
+                '/autograder/submission',                 # Gradescope submission dir
+                '/autograder/source',                     # Gradescope source dir
+            ]
             _found = False
             for ckpt_name in ['checkpoint_best.pt', 'checkpoint_last.pt', 'checkpoint.pt']:
                 for base_dir in _search_dirs:
