@@ -47,7 +47,7 @@ def scaled_dot_product_attention(
         V    : Value tensor,  shape (..., seq_k, d_v)
         mask : Optional Boolean mask, shape broadcastable to
                (..., seq_q, seq_k).
-               Positions where mask == 0 (False) are masked out
+               Positions where mask == True (1) are masked out
                (set to -1e9 before softmax).
 
     Returns:
@@ -59,8 +59,8 @@ def scaled_dot_product_attention(
     score = (Q @ K.transpose(-2, -1)) / math.sqrt(d_k)
 
     if mask is not None:
-        # mask == 0 / False means pad or future position → fill with -inf before softmax
-        score = score.masked_fill(mask == 0, float('-inf'))
+        # mask == True means pad or future position → fill with large negative before softmax
+        score = score.masked_fill(mask, -1e9)
 
     attn_w = F.softmax(score, dim=-1)
     # Replace NaN (from softmax of all-inf rows) with 0
@@ -88,10 +88,10 @@ def make_src_mask(
 
     Returns:
         Boolean mask, shape [batch, 1, 1, src_len]
-        True  → real token (attend here)
-        False → PAD token (masked out)
+        True  → PAD token (masked out — blocked in attention)
+        False → real token (attend here)
     """
-    src_mask = (src != pad_idx).unsqueeze(1).unsqueeze(2)
+    src_mask = (src == pad_idx).unsqueeze(1).unsqueeze(2)
     return src_mask
 
 
@@ -108,15 +108,15 @@ def make_tgt_mask(
 
     Returns:
         Boolean mask, shape [batch, 1, tgt_len, tgt_len]
-        True  → position can be attended to
-        False → PAD or future token (masked out)
+        True  → PAD or future token (masked out — blocked in attention)
+        False → position can be attended to
     """
-    tgt_pad_mask = (tgt != pad_idx).unsqueeze(1).unsqueeze(2)       # [B,1,1,T]
+    tgt_pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)        # [B,1,1,T] True=PAD
     tgt_len = tgt.shape[1]
-    tgt_sub_mask = torch.tril(
+    tgt_future_mask = ~torch.tril(
         torch.ones(tgt_len, tgt_len, device=tgt.device)
-    ).bool()                                                          # [T,T]
-    tgt_mask = tgt_pad_mask & tgt_sub_mask                           # [B,1,T,T]
+    ).bool()                                                          # [T,T] True=future
+    tgt_mask = tgt_pad_mask | tgt_future_mask                        # [B,1,T,T]
     return tgt_mask
 
 
@@ -503,19 +503,27 @@ class Transformer(nn.Module):
         # Auto-load config and weights from checkpoint when vocab sizes not given
         _state_dict = None
         if src_vocab_size is None or tgt_vocab_size is None:
-            for ckpt_path in ['checkpoint_best.pt', 'checkpoint_last.pt', 'checkpoint.pt']:
-                if os.path.exists(ckpt_path):
-                    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-                    cfg  = ckpt.get('model_config', {})
-                    src_vocab_size = cfg.get('src_vocab_size', src_vocab_size)
-                    tgt_vocab_size = cfg.get('tgt_vocab_size', tgt_vocab_size)
-                    d_model   = cfg.get('d_model',   d_model)
-                    N         = cfg.get('N',         N)
-                    num_heads = cfg.get('num_heads', num_heads)
-                    d_ff      = cfg.get('d_ff',      d_ff)
-                    dropout   = cfg.get('dropout',   dropout)
-                    pad_idx   = cfg.get('pad_idx',   pad_idx)
-                    _state_dict = ckpt.get('model_state_dict')
+            _model_dir = os.path.dirname(os.path.abspath(__file__))
+            _search_dirs = ['.', _model_dir]
+            _found = False
+            for ckpt_name in ['checkpoint_best.pt', 'checkpoint_last.pt', 'checkpoint.pt']:
+                for base_dir in _search_dirs:
+                    ckpt_path = os.path.join(base_dir, ckpt_name)
+                    if os.path.exists(ckpt_path):
+                        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+                        cfg  = ckpt.get('model_config', {})
+                        src_vocab_size = cfg.get('src_vocab_size', src_vocab_size)
+                        tgt_vocab_size = cfg.get('tgt_vocab_size', tgt_vocab_size)
+                        d_model   = cfg.get('d_model',   d_model)
+                        N         = cfg.get('N',         N)
+                        num_heads = cfg.get('num_heads', num_heads)
+                        d_ff      = cfg.get('d_ff',      d_ff)
+                        dropout   = cfg.get('dropout',   dropout)
+                        pad_idx   = cfg.get('pad_idx',   pad_idx)
+                        _state_dict = ckpt.get('model_state_dict')
+                        _found = True
+                        break
+                if _found:
                     break
 
         self.pad_idx = pad_idx
